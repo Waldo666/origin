@@ -22,82 +22,119 @@ jobs:
           $ProgressPreference = "SilentlyContinue"
           Invoke-WebRequest -Uri $env:INPUT_EXE_URL -OutFile input.exe
           Invoke-WebRequest -Uri $env:INPUT_LOGO_URL -OutFile logo.png
-          Write-Host "EXE_SIZE=$((Get-Item input.exe).Length)"
-          Write-Host "LOGO_SIZE=$((Get-Item logo.png).Length)"
-          Get-FileHash input.exe -Algorithm SHA256
-          Get-FileHash logo.png -Algorithm SHA256
 
-      - name: Inspect executable
+      - name: Inspect native executable
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Continue"
+          $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force diagnostics | Out-Null
-          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path input.exe))
-          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
-          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-          $optionalMagic = [BitConverter]::ToUInt16($bytes, $peOffset + 24)
-          "PE_OFFSET=$peOffset" | Tee-Object -FilePath diagnostics/report.txt
-          ("PE_MACHINE=0x{0:X4}" -f $machine) | Tee-Object -FilePath diagnostics/report.txt -Append
-          ("OPTIONAL_MAGIC=0x{0:X4}" -f $optionalMagic) | Tee-Object -FilePath diagnostics/report.txt -Append
-          $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path input.exe))
-          $vi | Format-List * | Out-String | Tee-Object -FilePath diagnostics/version-info.txt
-          try {
-            $an = [System.Reflection.AssemblyName]::GetAssemblyName((Resolve-Path input.exe))
-            "DOTNET=true" | Tee-Object -FilePath diagnostics/report.txt -Append
-            $an | Format-List * | Out-String | Tee-Object -FilePath diagnostics/assembly.txt
-          } catch {
-            "DOTNET=false" | Tee-Object -FilePath diagnostics/report.txt -Append
-            $_ | Out-String | Set-Content diagnostics/dotnet-error.txt
-          }
-          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
-          [regex]::Matches($ascii, '[ -~]{4,}') | ForEach-Object Value | Set-Content diagnostics/strings-ascii.txt
-          $unicode = [Text.Encoding]::Unicode.GetString($bytes)
-          [regex]::Matches($unicode, '[ -~]{4,}') | ForEach-Object Value | Set-Content diagnostics/strings-unicode.txt
-          & "C:\Program Files\7-Zip\7z.exe" l input.exe 2>&1 | Tee-Object -FilePath diagnostics/7zip-list.txt
+          python -m pip install --disable-pip-version-check --quiet pefile
           @'
-          import hashlib, json, pathlib, struct, sys
+          import hashlib, json, math, pathlib, re
+          import pefile
+
           p = pathlib.Path("input.exe")
           b = p.read_bytes()
-          out = {
+          pe = pefile.PE(data=b, fast_load=False)
+
+          def entropy(data):
+              if not data:
+                  return 0.0
+              from collections import Counter
+              n = len(data)
+              return -sum((c/n) * math.log2(c/n) for c in Counter(data).values())
+
+          report = {
               "size": len(b),
               "sha256": hashlib.sha256(b).hexdigest(),
-              "mz": b[:2].hex(),
-              "signatures": {s.decode("ascii", "ignore"): b.find(s) for s in [
-                  b"PyInstaller", b"pyi-windows-manifest-filename", b"MEI\014\013\012\013\016",
-                  b"BSJB", b"mscoree.dll", b"Electron", b"PK\003\004", b"UPX!"
-              ]},
+              "machine": hex(pe.FILE_HEADER.Machine),
+              "characteristics": hex(pe.FILE_HEADER.Characteristics),
+              "sections": [],
+              "imports": {},
+              "resources": [],
           }
-          pe = struct.unpack_from("<I", b, 0x3c)[0]
-          out["pe_offset"] = pe
-          out["machine"] = hex(struct.unpack_from("<H", b, pe + 4)[0])
-          out["sections"] = struct.unpack_from("<H", b, pe + 6)[0]
-          pathlib.Path("diagnostics/python-report.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
-          print(json.dumps(out, indent=2))
-          '@ | Set-Content -Encoding UTF8 inspect.py
-          python inspect.py 2>&1 | Tee-Object -FilePath diagnostics/python-console.txt
+          for s in pe.sections:
+              name = s.Name.rstrip(b"\0").decode("ascii", "replace")
+              raw = s.get_data()
+              report["sections"].append({
+                  "name": name,
+                  "virtual_address": hex(s.VirtualAddress),
+                  "virtual_size": s.Misc_VirtualSize,
+                  "raw_offset": s.PointerToRawData,
+                  "raw_size": s.SizeOfRawData,
+                  "entropy": round(entropy(raw), 3),
+              })
+          if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
+              for entry in pe.DIRECTORY_ENTRY_IMPORT:
+                  dll = entry.dll.decode("ascii", "replace")
+                  report["imports"][dll] = [
+                      (imp.name.decode("ascii", "replace") if imp.name else f"ordinal:{imp.ordinal}")
+                      for imp in entry.imports
+                  ]
+          if hasattr(pe, "DIRECTORY_ENTRY_RESOURCE"):
+              for top in pe.DIRECTORY_ENTRY_RESOURCE.entries:
+                  top_name = str(top.name) if top.name else str(top.struct.Id)
+                  for mid in getattr(top.directory, "entries", []):
+                      mid_name = str(mid.name) if mid.name else str(mid.struct.Id)
+                      for leaf in getattr(mid.directory, "entries", []):
+                          data = pe.get_data(leaf.data.struct.OffsetToData, leaf.data.struct.Size)
+                          report["resources"].append({
+                              "type": top_name, "id": mid_name, "lang": leaf.struct.Id,
+                              "size": len(data), "sha256": hashlib.sha256(data).hexdigest()
+                          })
 
-      - name: Decompile managed executable
+          low = b.lower()
+          html_starts = [low.find(x) for x in (b"<!doctype html", b"<html", b"<head", b"<body")]
+          html_starts = [x for x in html_starts if x >= 0]
+          report["html_markers"] = html_starts
+          if html_starts:
+              start = min(html_starts)
+              end = low.find(b"</html>", start)
+              if end >= 0:
+                  end += len(b"</html>")
+              else:
+                  end = min(len(b), start + 100000)
+              pathlib.Path("diagnostics/recovered.html").write_bytes(b[start:end])
+              report["recovered_html"] = {"start": start, "end": end, "size": end-start}
+
+          strings = []
+          for m in re.finditer(rb"[\x09\x0a\x0d\x20-\x7e]{6,}", b):
+              strings.append((m.start(), len(m.group()), m.group().decode("ascii", "replace")))
+          strings.sort(key=lambda x: x[1], reverse=True)
+          pathlib.Path("diagnostics/longest-strings.txt").write_text(
+              "\n\n".join(f"OFFSET={o} LENGTH={n}\n{s}" for o,n,s in strings[:100]),
+              encoding="utf-8", errors="replace"
+          )
+          report["longest_strings"] = [
+              {"offset": o, "length": n, "preview": s[:500]} for o,n,s in strings[:25]
+          ]
+          report["urls"] = sorted(set(
+              x.decode("ascii", "replace")
+              for x in re.findall(rb"https?://[^\x00\s\"'<>]+", b)
+          ))
+          pathlib.Path("diagnostics/native-report.json").write_text(
+              json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+          )
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          '@ | Set-Content -Encoding UTF8 inspect_native.py
+          python inspect_native.py
+
+      - name: Disassemble and list symbols
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
-          dotnet tool install --global ilspycmd 2>&1 | Tee-Object -FilePath diagnostics/ilspy-install.txt
-          $ilspy = Join-Path $env:USERPROFILE ".dotnet\tools\ilspycmd.exe"
-          if (Test-Path $ilspy) {
-            New-Item -ItemType Directory -Force decompiled | Out-Null
-            & $ilspy -p -o decompiled input.exe 2>&1 | Tee-Object -FilePath diagnostics/ilspy-project.txt
-            & $ilspy -l c input.exe 2>&1 | Tee-Object -FilePath diagnostics/ilspy-types.txt
-          } else {
-            "ilspycmd not installed" | Set-Content diagnostics/ilspy-missing.txt
+          $vswhere = "$env:ProgramFiles(x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$installation\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if ($dumpbin) {
+            & $dumpbin.FullName /headers /imports /symbols /disasm input.exe 2>&1 | Tee-Object -FilePath diagnostics/dumpbin.txt
           }
 
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: forja-diagnostics
-          path: |
-            diagnostics
-            decompiled
-            logo.png
-          if-no-files-found: warn
+          name: forja-diagnostics-v2
+          path: diagnostics
+          if-no-files-found: error
           retention-days: 1
