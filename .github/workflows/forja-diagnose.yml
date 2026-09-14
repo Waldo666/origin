@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - name: Download authorized inputs
         shell: pwsh
@@ -566,7 +567,11 @@ jobs:
 
           $target = Join-Path $env:LOCALAPPDATA "ForjaCartasDND\index.html"
           if (Test-Path $target) { Remove-Item $target -Force }
-          $process = Start-Process -FilePath ".\ForjaCartasDND.exe" -PassThru -Wait
+          $process = Start-Process -FilePath ".\ForjaCartasDND.exe" -PassThru
+          if (-not $process.WaitForExit(10000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Launcher did not exit after handing off to the browser"
+          }
           if ($process.ExitCode -ne 0) { throw "Launcher exited with code $($process.ExitCode)" }
           Start-Sleep -Seconds 2
           if (-not (Test-Path $target)) { throw "Launcher did not write the embedded application" }
