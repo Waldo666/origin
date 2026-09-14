@@ -343,8 +343,8 @@ jobs:
           }
 
           static int RunForja(void) {
-              WCHAR directory[32768] = {0};
-              WCHAR htmlPath[32768] = {0};
+              static WCHAR directory[32768] = {0};
+              static WCHAR htmlPath[32768] = {0};
               DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, 32768);
               if (length == 0 || length >= 32768) {
                   MessageBoxW(NULL, L"No se pudo localizar la carpeta de datos de Windows.", L"Forja de Cartas D&D", MB_OK | MB_ICONERROR);
@@ -492,9 +492,9 @@ jobs:
 
           rc.exe /nologo /fo launcher.res launcher.rc
           if ($LASTEXITCODE -ne 0) { throw "Resource compilation failed" }
-          cl.exe /nologo /c /O2 /GS- /sdl- /DUNICODE /D_UNICODE /Fo:launcher.obj launcher.c
+          cl.exe /nologo /c /O2 /MT /GS- /sdl- /DUNICODE /D_UNICODE /Fo:launcher.obj launcher.c
           if ($LASTEXITCODE -ne 0) { throw "C compilation failed" }
-          link.exe /nologo /OUT:ForjaCartasDND.exe /SUBSYSTEM:WINDOWS /MACHINE:X64 /ENTRY:wWinMainCRTStartup /NODEFAULTLIB /OPT:REF /OPT:ICF launcher.obj launcher.res kernel32.lib user32.lib shell32.lib
+          link.exe /nologo /OUT:ForjaCartasDND.exe /SUBSYSTEM:WINDOWS /MACHINE:X64 /ENTRY:wWinMainCRTStartup /OPT:REF /OPT:ICF launcher.obj launcher.res kernel32.lib user32.lib shell32.lib
           if ($LASTEXITCODE -ne 0) { throw "Link failed" }
 
       - name: Validate executable and preserved app
