@@ -272,7 +272,7 @@ jobs:
               'window.print()',
               'Shift + Enter',
               'renderStatsEditor',
-              'registerWebMCPTools'
+              'read_card_sheet'
           ]
           missing = [item for item in critical if item not in modified]
           if missing:
@@ -543,7 +543,7 @@ jobs:
               "loadProjectFile",
               "window.print()",
               "Shift + Enter",
-              "registerWebMCPTools"
+              "read_card_sheet"
           ]
           missing = [x for x in required if x not in text]
           if missing:
