@@ -1,0 +1,103 @@
+name: Forja diagnostics
+on:
+  push:
+    paths:
+      - ".github/workflows/forja-diagnose.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    steps:
+      - name: Download authorized inputs
+        shell: pwsh
+        env:
+          INPUT_EXE_URL: "https://oaisdmntprnortheu.blob.core.windows.net/files/00000000-434c-81f4-ae60-a92c6c78ea3f/raw?se=2026-09-14T16%3A15%3A36Z&sp=r&sv=2026-02-06&sr=b&scid=01a0a07c-4e69-72de-a6bb-9888d4b511f2&skoid=86ad43b0-1afa-4d46-a6d6-9e67f7cdc5bc&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-09-14T14%3A36%3A52Z&ske=2026-09-15T14%3A36%3A52Z&sks=b&skv=2026-02-06&sig=AM6O8rjKf%2BSNGklfiN2gcPKnjqYadtLPwrpGe02%2BYn4%3D"
+          INPUT_LOGO_URL: "https://oaisdmntprsoutheastus3.blob.core.windows.net/files/00000000-3b8c-820c-922b-971bac3121a0/raw?se=2026-09-14T16%3A15%3A36Z&sp=r&sv=2026-02-06&sr=b&scid=01a0a07c-4e69-72de-a6bb-9888d4b511f2&skoid=86ad43b0-1afa-4d46-a6d6-9e67f7cdc5bc&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-09-14T10%3A12%3A56Z&ske=2026-09-15T10%3A12%3A56Z&sks=b&skv=2026-02-06&sig=1WoaI03l2W15DrAMLNitw96C02UtAKb//d0VduMW7Sg%3D"
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          Invoke-WebRequest -Uri $env:INPUT_EXE_URL -OutFile input.exe
+          Invoke-WebRequest -Uri $env:INPUT_LOGO_URL -OutFile logo.png
+          Write-Host "EXE_SIZE=$((Get-Item input.exe).Length)"
+          Write-Host "LOGO_SIZE=$((Get-Item logo.png).Length)"
+          Get-FileHash input.exe -Algorithm SHA256
+          Get-FileHash logo.png -Algorithm SHA256
+
+      - name: Inspect executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          New-Item -ItemType Directory -Force diagnostics | Out-Null
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path input.exe))
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $optionalMagic = [BitConverter]::ToUInt16($bytes, $peOffset + 24)
+          "PE_OFFSET=$peOffset" | Tee-Object -FilePath diagnostics/report.txt
+          ("PE_MACHINE=0x{0:X4}" -f $machine) | Tee-Object -FilePath diagnostics/report.txt -Append
+          ("OPTIONAL_MAGIC=0x{0:X4}" -f $optionalMagic) | Tee-Object -FilePath diagnostics/report.txt -Append
+          $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path input.exe))
+          $vi | Format-List * | Out-String | Tee-Object -FilePath diagnostics/version-info.txt
+          try {
+            $an = [System.Reflection.AssemblyName]::GetAssemblyName((Resolve-Path input.exe))
+            "DOTNET=true" | Tee-Object -FilePath diagnostics/report.txt -Append
+            $an | Format-List * | Out-String | Tee-Object -FilePath diagnostics/assembly.txt
+          } catch {
+            "DOTNET=false" | Tee-Object -FilePath diagnostics/report.txt -Append
+            $_ | Out-String | Set-Content diagnostics/dotnet-error.txt
+          }
+          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+          [regex]::Matches($ascii, '[ -~]{4,}') | ForEach-Object Value | Set-Content diagnostics/strings-ascii.txt
+          $unicode = [Text.Encoding]::Unicode.GetString($bytes)
+          [regex]::Matches($unicode, '[ -~]{4,}') | ForEach-Object Value | Set-Content diagnostics/strings-unicode.txt
+          & "C:\Program Files\7-Zip\7z.exe" l input.exe 2>&1 | Tee-Object -FilePath diagnostics/7zip-list.txt
+          @'
+          import hashlib, json, pathlib, struct, sys
+          p = pathlib.Path("input.exe")
+          b = p.read_bytes()
+          out = {
+              "size": len(b),
+              "sha256": hashlib.sha256(b).hexdigest(),
+              "mz": b[:2].hex(),
+              "signatures": {s.decode("ascii", "ignore"): b.find(s) for s in [
+                  b"PyInstaller", b"pyi-windows-manifest-filename", b"MEI\014\013\012\013\016",
+                  b"BSJB", b"mscoree.dll", b"Electron", b"PK\003\004", b"UPX!"
+              ]},
+          }
+          pe = struct.unpack_from("<I", b, 0x3c)[0]
+          out["pe_offset"] = pe
+          out["machine"] = hex(struct.unpack_from("<H", b, pe + 4)[0])
+          out["sections"] = struct.unpack_from("<H", b, pe + 6)[0]
+          pathlib.Path("diagnostics/python-report.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
+          print(json.dumps(out, indent=2))
+          '@ | Set-Content -Encoding UTF8 inspect.py
+          python inspect.py 2>&1 | Tee-Object -FilePath diagnostics/python-console.txt
+
+      - name: Decompile managed executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          dotnet tool install --global ilspycmd 2>&1 | Tee-Object -FilePath diagnostics/ilspy-install.txt
+          $ilspy = Join-Path $env:USERPROFILE ".dotnet\tools\ilspycmd.exe"
+          if (Test-Path $ilspy) {
+            New-Item -ItemType Directory -Force decompiled | Out-Null
+            & $ilspy -p -o decompiled input.exe 2>&1 | Tee-Object -FilePath diagnostics/ilspy-project.txt
+            & $ilspy -l c input.exe 2>&1 | Tee-Object -FilePath diagnostics/ilspy-types.txt
+          } else {
+            "ilspycmd not installed" | Set-Content diagnostics/ilspy-missing.txt
+          }
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forja-diagnostics
+          path: |
+            diagnostics
+            decompiled
+            logo.png
+          if-no-files-found: warn
+          retention-days: 1
