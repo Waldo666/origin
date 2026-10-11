@@ -1104,7 +1104,7 @@ jobs:
             var boldWorks = !!document.querySelector(".game-card .card-description strong");
             document.getElementById("validation-result").textContent = "OVERFLOWS=" + overflows.length + ";BOLD=" + boldWorks;
           }, 900);
-          <\/script>
+          </script>
           '''
           layout = text.replace("</body>", test_script + "\n</body>", 1)
           Path("layout-test.html").write_text(layout, encoding="utf-8")
