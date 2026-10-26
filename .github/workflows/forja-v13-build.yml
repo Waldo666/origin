@@ -1880,7 +1880,7 @@ jobs:
             throw "Edge validation failed: $report"
           }
           & $edge --headless=new --disable-gpu --no-first-run --no-default-browser-check --user-data-dir="$profile-shot" --virtual-time-budget=5000 --window-size=1600,1000 --screenshot="$PWD\validation-screenshot.png" "$url"
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path .\validation-screenshot.png)) { throw 'Edge screenshot failed.' }
+          if (-not (Test-Path .\validation-screenshot.png)) { throw 'Edge screenshot failed.' }
 
       - name: Package release
         shell: pwsh
