@@ -1879,7 +1879,11 @@ jobs:
             Write-Host 'EDGE_DUMP_TAIL_END'
             throw "Edge validation failed: $report"
           }
-          & $edge --headless=new --disable-gpu --no-first-run --no-default-browser-check --user-data-dir="$profile-shot" --virtual-time-budget=5000 --window-size=1600,1000 --screenshot="$PWD\validation-screenshot.png" "$url"
+          $shotProfile = Join-Path $PWD 'edge-profile-shot'
+          $shotPath = Join-Path $PWD 'validation-screenshot.png'
+          $shotArguments = @('--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', "--user-data-dir=$shotProfile", '--virtual-time-budget=5000', '--window-size=1600,1000', "--screenshot=$shotPath", $url)
+          $shotProcess = Start-Process -FilePath $edge -ArgumentList $shotArguments -Wait -PassThru -NoNewWindow
+          Write-Host "Edge screenshot exit code: $($shotProcess.ExitCode)"
           if (-not (Test-Path .\validation-screenshot.png)) { throw 'Edge screenshot failed.' }
 
       - name: Package release
