@@ -1873,6 +1873,10 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $PWD 'edge-dom.txt'), $dump, [Text.UTF8Encoding]::new($false))
           if ($dump -notmatch 'data-validation="PASS"') {
             $report = [regex]::Match($dump, '<pre id="validation-report">([\s\S]*?)</pre>').Groups[1].Value
+            $tailStart = [Math]::Max(0, $dump.Length - 12000)
+            Write-Host 'EDGE_DUMP_TAIL_BEGIN'
+            Write-Host $dump.Substring($tailStart)
+            Write-Host 'EDGE_DUMP_TAIL_END'
             throw "Edge validation failed: $report"
           }
           & $edge --headless=new --disable-gpu --no-first-run --no-default-browser-check --user-data-dir="$profile-shot" --virtual-time-budget=5000 --window-size=1600,1000 --screenshot="$PWD\validation-screenshot.png" "$url"
@@ -1895,6 +1899,7 @@ jobs:
           retention-days: 1
 
       - name: Upload QA evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ForjaCartasDND-v1.3-QA
